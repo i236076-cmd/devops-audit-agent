@@ -41,6 +41,7 @@ class ToolCall:
     id: str
     name: str
     arguments: dict
+    extra: dict = None  # provider metadata that must be echoed back (Gemini thought signature)
 
 
 @dataclass
@@ -62,20 +63,23 @@ class OpenAIBackend:
         out = [{"role": "system", "content": system}]
         for msg in messages:
             if msg["role"] == "assistant" and msg.get("tool_calls"):
+                tool_calls = []
+                for call in msg["tool_calls"]:
+                    entry = {
+                        "id": call["id"],
+                        "type": "function",
+                        "function": {
+                            "name": call["name"],
+                            "arguments": json.dumps(call["arguments"]),
+                        },
+                    }
+                    if call.get("extra"):  # Gemini 3 needs its thought signature sent back
+                        entry["extra_content"] = call["extra"]
+                    tool_calls.append(entry)
                 out.append({
                     "role": "assistant",
                     "content": msg.get("content") or None,
-                    "tool_calls": [
-                        {
-                            "id": call["id"],
-                            "type": "function",
-                            "function": {
-                                "name": call["name"],
-                                "arguments": json.dumps(call["arguments"]),
-                            },
-                        }
-                        for call in msg["tool_calls"]
-                    ],
+                    "tool_calls": tool_calls,
                 })
             elif msg["role"] == "tool":
                 out.append({
@@ -99,7 +103,10 @@ class OpenAIBackend:
                 arguments = json.loads(call.function.arguments or "{}")
             except json.JSONDecodeError:
                 arguments = {}
-            calls.append(ToolCall(call.id, call.function.name, arguments))
+            extra = getattr(call, "extra_content", None)
+            if extra is None:
+                extra = (getattr(call, "model_extra", None) or {}).get("extra_content")
+            calls.append(ToolCall(call.id, call.function.name, arguments, extra))
         return LLMResponse(message.content or "", calls)
 
 
