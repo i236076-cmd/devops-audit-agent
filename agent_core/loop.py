@@ -118,7 +118,10 @@ class AuditAgent:
         self.max_steps = max_steps
         self.max_seconds = max_seconds
         if min_interval is None:
-            min_interval = float(os.getenv("LLM_MIN_INTERVAL", "1.0"))
+            try:
+                min_interval = float(os.getenv("LLM_MIN_INTERVAL") or "1.0")
+            except ValueError:
+                min_interval = 1.0
         self.min_interval = min_interval
         self.log = log or (lambda text: print(text, file=sys.stderr))
         self.trace = []

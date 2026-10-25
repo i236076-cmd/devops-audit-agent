@@ -152,3 +152,23 @@ def test_cli_exits_nonzero_when_clone_fails(cli, monkeypatch):
     monkeypatch.setattr(agent, "clone_repo", broken_clone)
     assert cli([]) == 1
     assert not cli.report.exists()
+
+
+@pytest.mark.parametrize("value", ["", "not-a-number"])
+def test_empty_or_invalid_min_interval_falls_back_to_default(sample_repo, monkeypatch, value):
+    monkeypatch.setenv("LLM_MIN_INTERVAL", value)
+    audit = AuditAgent(FakeLLM([]), RepoTools(sample_repo), "https://github.com/a/b")
+    assert audit.min_interval == 1.0
+
+
+def test_env_example_lists_every_setting_and_loads_with_empty_values():
+    from pathlib import Path
+
+    from dotenv import dotenv_values
+
+    values = dotenv_values(Path(__file__).parent.parent / ".env.example")
+    assert set(values) == {
+        "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_PROVIDER", "LLM_MODEL",
+        "LLM_BASE_URL", "LLM_REASONING_EFFORT", "LLM_MIN_INTERVAL",
+    }
+    assert all(not value for value in values.values())
