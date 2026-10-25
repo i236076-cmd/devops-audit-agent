@@ -162,3 +162,34 @@ def test_redact_keeps_placeholders_and_references_readable(line):
 
 def test_redact_env_style_does_not_swallow_the_next_line():
     assert redact_secrets("API_KEY=\nNAME=demo") == "API_KEY=\nNAME=demo"
+
+
+def _failed_clone(stderr):
+    return lambda *args, **kwargs: subprocess.CompletedProcess(args, 128, "", stderr)
+
+
+@pytest.mark.parametrize("stderr", [
+    "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+    "fatal: repository 'https://github.com/a/missing.git/' not found",
+])
+def test_clone_repo_explains_missing_or_private_repositories(monkeypatch, stderr):
+    monkeypatch.setattr(tools.subprocess, "run", _failed_clone(stderr))
+    with pytest.raises(RuntimeError, match="not found or is not public"):
+        clone_repo("https://github.com/a/missing")
+
+
+def test_clone_repo_removes_its_temp_directory_when_cloning_fails(monkeypatch):
+    import os
+
+    created = []
+    real_mkdtemp = tools.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*args, **kwargs):
+        created.append(real_mkdtemp(*args, **kwargs))
+        return created[-1]
+
+    monkeypatch.setattr(tools.tempfile, "mkdtemp", tracking_mkdtemp)
+    monkeypatch.setattr(tools.subprocess, "run", _failed_clone("fatal: something else went wrong"))
+    with pytest.raises(RuntimeError, match="Could not clone"):
+        clone_repo("https://github.com/a/b")
+    assert created and not os.path.exists(created[0])

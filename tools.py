@@ -87,6 +87,7 @@ def validate_repo_url(url):
 def clone_repo(url, dest=None, depth=CLONE_DEPTH):
     """Shallow-clone a public GitHub repo into dest (a temp dir by default)."""
     clean_url = validate_repo_url(url)
+    created = dest is None
     dest = dest or tempfile.mkdtemp(prefix="audit_")
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     cmd = [
@@ -97,17 +98,23 @@ def clone_repo(url, dest=None, depth=CLONE_DEPTH):
         clean_url + ".git", dest,
     ]
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=CLONE_TIMEOUT, env=env
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Cloning {clean_url} timed out after {CLONE_TIMEOUT}s")
-    except FileNotFoundError:
-        raise RuntimeError("git is not installed or not on PATH")
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Could not clone {clean_url}: {redact_secrets(result.stderr.strip())}"
-        )
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=CLONE_TIMEOUT, env=env
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Cloning {clean_url} timed out after {CLONE_TIMEOUT}s") from None
+        except FileNotFoundError:
+            raise RuntimeError("git is not installed or not on PATH") from None
+        if result.returncode != 0:
+            stderr = redact_secrets(result.stderr.strip())
+            if "could not read Username" in stderr or "not found" in stderr.lower():
+                raise RuntimeError(f"Repository {clean_url} was not found or is not public")
+            raise RuntimeError(f"Could not clone {clean_url}: {stderr}")
+    except RuntimeError:
+        if created:
+            shutil.rmtree(dest, ignore_errors=True)  # do not leave an empty temp folder behind
+        raise
     return dest
 
 
@@ -149,6 +156,10 @@ class RepoTools:
                     files.append(str(full.relative_to(self.root)))
         self._tracked = sorted(files)
         return self._tracked
+
+    def tracked_files(self):
+        """List of tracked file paths (also used by the agent's completeness check)."""
+        return list(self._tracked_files())
 
     def _safe_path(self, rel_path):
         path = (self.root / rel_path).resolve()

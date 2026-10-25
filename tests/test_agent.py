@@ -18,18 +18,25 @@ VIOLATION = {
 REPORT = tool_reply(("submit_report", {"violations": [VIOLATION]}))
 INSPECTION = [
     tool_reply(("list_files", {})),
-    tool_reply(("read_file", {"path": "config.py"}), ("search_code", {"pattern": "api_key"})),
+    tool_reply(
+        ("read_file", {"path": "config.py"}),
+        ("read_file", {"path": ".github/workflows/ci.yml"}),
+        ("search_code", {"pattern": "api_key"}),
+    ),
 ]
 
 
 def make_agent(llm, repo, **kwargs):
+    kwargs.setdefault("coverage_reviews", 0)
     return AuditAgent(llm, RepoTools(repo), "https://github.com/a/b", min_interval=0, log=lambda text: None, **kwargs)
 
 
 def test_agent_investigates_then_reports(sample_repo):
     audit = make_agent(FakeLLM(INSPECTION + [REPORT]), sample_repo)
     assert audit.run() == [VIOLATION]
-    assert [step["tool"] for step in audit.trace] == ["list_files", "read_file", "search_code", "submit_report"]
+    assert [step["tool"] for step in audit.trace] == [
+        "list_files", "read_file", "read_file", "search_code", "submit_report",
+    ]
 
 
 def test_tool_results_are_fed_back_to_the_model(sample_repo):
@@ -172,3 +179,55 @@ def test_env_example_lists_every_setting_and_loads_with_empty_values():
         "LLM_BASE_URL", "LLM_REASONING_EFFORT", "LLM_MIN_INTERVAL",
     }
     assert all(not value for value in values.values())
+
+
+def test_report_is_sent_back_once_when_inspection_has_gaps(sample_repo):
+    llm = FakeLLM([
+        tool_reply(("list_files", {})), tool_reply(("read_file", {"path": "README.md"})), tool_reply(("git_log", {})),
+        REPORT,
+        tool_reply(("read_file", {"path": "config.py"}), ("read_file", {"path": ".github/workflows/ci.yml"}),
+                   ("search_code", {"pattern": "password"})),
+        REPORT,
+    ])
+    audit = make_agent(llm, sample_repo, coverage_reviews=1)
+    assert audit.run() == [VIOLATION]
+    rejection = [m["content"] for m in llm.calls[4]["messages"] if m["role"] == "tool"][-1]
+    assert rejection.startswith("Not accepted yet")
+    assert "never searched the code for hardcoded credentials" in rejection
+    assert "config.py" in rejection and ".github/workflows/ci.yml" in rejection
+
+
+def test_the_completeness_review_happens_only_once(sample_repo):
+    llm = FakeLLM([tool_reply(("list_files", {})), tool_reply(("git_log", {})), tool_reply(("git_log", {})),
+                   REPORT, REPORT])
+    assert make_agent(llm, sample_repo, coverage_reviews=1).run() == [VIOLATION]
+    assert len(llm.calls) == 5
+
+
+def test_no_gaps_means_the_report_is_accepted_immediately(sample_repo):
+    llm = FakeLLM(INSPECTION + [REPORT])
+    assert make_agent(llm, sample_repo, coverage_reviews=1).run() == [VIOLATION]
+    assert len(llm.calls) == 3
+
+
+def test_paths_are_normalised_when_checking_what_was_read(sample_repo):
+    audit = make_agent(FakeLLM([]), sample_repo, coverage_reviews=1)
+    audit.trace.append({"tool": "read_file", "arguments": {"path": "./config.py"}})
+    gaps = " ".join(audit._coverage_gaps([]))
+    assert "config.py" not in gaps and ".github/workflows/ci.yml" in gaps
+
+
+def test_missing_readme_is_pointed_out_unless_already_reported(tmp_path):
+    (tmp_path / "app.py").write_text("print('hi')\n")
+    audit = make_agent(FakeLLM([]), tmp_path, coverage_reviews=1)
+    assert any("no README" in gap for gap in audit._coverage_gaps([]))
+    reported = [{"description": "README is missing", "evidence": "none"}]
+    assert not any("no README" in gap for gap in audit._coverage_gaps(reported))
+
+
+def test_dotfiles_such_as_env_count_as_configuration_files(tmp_path):
+    (tmp_path / ".env").write_text("A=1\n")
+    audit = make_agent(FakeLLM([]), tmp_path, coverage_reviews=1)
+    assert ".env" in " ".join(audit._coverage_gaps([]))
+    audit.trace.append({"tool": "read_file", "arguments": {"path": ".env"}})
+    assert "configuration files" not in " ".join(audit._coverage_gaps([]))

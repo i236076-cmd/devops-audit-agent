@@ -7,6 +7,7 @@ and tool dispatch is plain Python (no agent frameworks).
 
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -17,6 +18,7 @@ MAX_STEPS = 20               # LLM turns before we force a final report
 MAX_SECONDS = 240            # wall-clock budget before we force a final report
 MIN_INVESTIGATION_CALLS = 3  # refuse a report before this many inspections
 MAX_NUDGES = 2               # times we remind the model to use a tool
+MAX_COVERAGE_REVIEWS = 1     # times a report is sent back to close inspection gaps
 KEEP_FULL_OUTPUTS = 4        # newest tool outputs kept in full in the context
 OLD_OUTPUT_CHARS = 400       # older tool outputs are shortened to this
 
@@ -26,6 +28,25 @@ CATEGORIES = [
     "build_release",
 ]
 SEVERITIES = ["critical", "high", "medium", "low"]
+
+# File kinds a thorough audit should have looked at (used by the completeness check).
+SECRET_WORDS = re.compile(r"(?i)secret|passw|token|api[_-]?key|credential")
+MANIFESTS = re.compile(
+    r"(?i)(^|/)(requirements[^/]*\.txt|pyproject\.toml|setup\.py|setup\.cfg|pipfile|package\.json|"
+    r"go\.mod|pom\.xml|build\.gradle|gemfile|cargo\.toml|composer\.json)$"
+)
+CONFIG_FILES = re.compile(
+    r"(?i)(^|/)([^/]*config[^/]*\.(py|ya?ml|json|toml|ini|js|ts)|settings[^/]*\.(py|ya?ml|json|toml|ini)|"
+    r"\.env[^/]*|application[^/]*\.(properties|ya?ml)|docker-compose[^/]*\.ya?ml|dockerfile[^/]*|makefile)$"
+)
+WORKFLOWS = re.compile(r"^\.github/workflows/[^/]+\.ya?ml$")
+
+
+def _norm_path(path):
+    path = str(path or "").strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path.lstrip("/")
 
 
 class AgentError(Exception):
@@ -90,7 +111,9 @@ EVIDENCE RULES (precision matters: a wrong finding is penalised)
 - Report a violation only if you saw the evidence yourself in a tool result. Give the file and the exact line number from read_file or search_code output.
 - An absent optional file is not a defect if an equivalent exists (pyproject.toml instead of requirements.txt, ruff configured in pyproject, flake8 instead of ruff, pre-commit instead of a CI lint job). Check for equivalents before claiming something is missing.
 - Never infer remote settings such as branch protection from repository files.
-- Do not report the same underlying problem twice. One entry per distinct defect.
+- Do not report the same underlying problem twice, and do not report a consequence of another finding as a separate violation. Report each distinct defect separately, even when several are in the same file: for example a dangerous workflow trigger and an over-broad permission are two entries.
+- Never report something about a file you have not read. File names alone are not evidence.
+- The line must be the line where the problem is. Unpinned action or image tags are low severity.
 - Always give file and line when the evidence is in a specific file. Omit them only for problems about something missing.
 - run_ruff output is style-level. Report it only for clear defects such as syntax errors or undefined names, never for rule codes that only express style preferences.
 - An empty file (0 lines) where content is expected, such as a README or test file, counts as missing. Empty or missing tests belong in category testing.
@@ -111,12 +134,13 @@ When finished, call submit_report once. Each violation needs rule_id, category, 
 
 class AuditAgent:
     def __init__(self, llm, tools, repo_url, max_steps=MAX_STEPS, min_interval=None, log=None,
-                 max_seconds=MAX_SECONDS):
+                 max_seconds=MAX_SECONDS, coverage_reviews=MAX_COVERAGE_REVIEWS):
         self.llm = llm
         self.tools = tools
         self.repo_url = repo_url
         self.max_steps = max_steps
         self.max_seconds = max_seconds
+        self.coverage_reviews = coverage_reviews
         if min_interval is None:
             try:
                 min_interval = float(os.getenv("LLM_MIN_INTERVAL") or "1.0")
@@ -172,6 +196,30 @@ class AuditAgent:
                     "Look at the structure, CI workflows, dependency files and .gitignore first."), None
         return "Report accepted.", violations
 
+    def _coverage_gaps(self, violations):
+        """Inspection areas the model skipped. The model decides what to do about them."""
+        files = self.tools.tracked_files()
+        read = {_norm_path(c["arguments"].get("path")) for c in self.trace if c["tool"] == "read_file"}
+        gaps = []
+        searched_secrets = any(
+            c["tool"] == "search_code" and SECRET_WORDS.search(str(c["arguments"].get("pattern", "")))
+            for c in self.trace
+        )
+        if not searched_secrets:
+            gaps.append("You never searched the code for hardcoded credentials. Use search_code "
+                        "with patterns such as api_key, secret, token, password.")
+        for label, pattern in (("dependency files", MANIFESTS), ("configuration files", CONFIG_FILES),
+                               ("CI workflow files", WORKFLOWS)):
+            unread = [name for name in files if pattern.search(name) and name not in read]
+            if unread:
+                gaps.append(f"These {label} were never read: {', '.join(unread[:6])}.")
+        has_readme = any(re.match(r"(?i)^readme(\.\w+)?$", name) for name in files)
+        mentions_readme = any("readme" in str(v).lower() for v in violations if isinstance(v, dict))
+        if not has_readme and not mentions_readme:
+            gaps.append("The file list has no README at the repository root. Check for an equivalent "
+                        "(for example under docs/); if there is none, report the missing README.")
+        return gaps
+
     # ---- main loop -------------------------------------------------------
     def run(self):
         """Investigate the repository and return the raw list of violations."""
@@ -183,6 +231,7 @@ class AuditAgent:
         tool_defs = TOOL_SCHEMAS + [SUBMIT_SCHEMA]
         inspections = 0
         nudges = 0
+        reviews_left = self.coverage_reviews
         self._t0 = time.monotonic()
 
         for step in range(1, self.max_steps + 1):
@@ -215,7 +264,15 @@ class AuditAgent:
                 if call.name == "submit_report":
                     output, violations = self._check_submission(call.arguments, inspections)
                     if violations is not None:
-                        accepted = violations
+                        gaps = self._coverage_gaps(violations) if reviews_left > 0 else []
+                        if gaps:
+                            reviews_left -= 1
+                            output = ("Not accepted yet. Before finishing, close these gaps:\n- "
+                                      + "\n- ".join(gaps)
+                                      + "\nInspect them with your tools, add any real findings, "
+                                        "then call submit_report again.")
+                        else:
+                            accepted = violations
                 else:
                     output = self.tools.dispatch(call.name, call.arguments)
                     inspections += 1
