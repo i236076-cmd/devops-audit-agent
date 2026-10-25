@@ -24,7 +24,7 @@ CLONE_TIMEOUT = 120      # seconds
 CMD_TIMEOUT = 30         # seconds
 SEARCH_TIMEOUT = 20      # seconds
 MAX_FILE_BYTES = 200_000
-MAX_OUTPUT_CHARS = 6000
+MAX_OUTPUT_CHARS = 3000
 
 # Patterns that look like credentials. Used to mask values before output.
 SECRET_PATTERNS = [

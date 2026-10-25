@@ -1,0 +1,105 @@
+{
+  "repository": "https://github.com/i236076-cmd/devops-audit-demo",
+  "violations": [
+    {
+      "rule_id": "SEC-001",
+      "category": "security",
+      "severity": "critical",
+      "file": ".env",
+      "line": 2,
+      "description": "Hardcoded database password is committed in the .env file.",
+      "evidence": ".env line 2 contains `DB_PASSWORD=[REDACTED]`.",
+      "recommendation": "Remove the .env file from the repository, add it to .gitignore, and provide configuration via environment variables or secret management."
+    },
+    {
+      "rule_id": "CI-001",
+      "category": "github_actions_ci",
+      "severity": "critical",
+      "file": ".github/workflows/ci.yml",
+      "line": 4,
+      "description": "Workflow is triggered on `pull_request_target` with `write-all` permissions, allowing untrusted PR code to run with elevated rights.",
+      "evidence": "ci.yml line 4 defines `pull_request_target`; line 6 sets `permissions: write-all`.",
+      "recommendation": "Switch the trigger to `pull_request` and restrict permissions to the minimum required (e.g., `contents: read`)."
+    },
+    {
+      "rule_id": "SEC-002",
+      "category": "security",
+      "severity": "critical",
+      "file": "config.py",
+      "line": 3,
+      "description": "API key is hardcoded in source code (config.py).",
+      "evidence": "config.py line 3 contains `API_KEY = \"[REDACTED]\"`.",
+      "recommendation": "Move the API key to a secret store or environment variable and reference it at runtime; do not commit secrets."
+    },
+    {
+      "rule_id": "CI-002",
+      "category": "github_actions_ci",
+      "severity": "high",
+      "file": ".github/workflows/ci.yml",
+      "line": 12,
+      "description": "The checkout step uses an unpinned action reference (`@master`).",
+      "evidence": "ci.yml line 12 uses `actions/checkout@master`.",
+      "recommendation": "Pin the action to a specific SHA or a stable version tag such as `@v3`."
+    },
+    {
+      "rule_id": "CI-003",
+      "category": "github_actions_ci",
+      "severity": "high",
+      "file": ".github/workflows/ci.yml",
+      "line": 16,
+      "description": "Test step suppresses failures with `|| true`, allowing CI to pass even when tests fail.",
+      "evidence": "ci.yml line 16 runs `pytest || true`.",
+      "recommendation": "Remove `|| true` so that the workflow fails if tests fail."
+    },
+    {
+      "rule_id": "BLD-001",
+      "category": "build_release",
+      "severity": "high",
+      "file": "Dockerfile",
+      "line": 1,
+      "description": "Dockerfile uses the unpinned `python:latest` base image, risking unexpected changes.",
+      "evidence": "Dockerfile line 1: `FROM python:latest`.",
+      "recommendation": "Pin the base image to a specific version tag (e.g., `python:3.11-slim`)."
+    },
+    {
+      "rule_id": "DEP-001",
+      "category": "dependency_management",
+      "severity": "high",
+      "file": "requirements.txt",
+      "line": 1,
+      "description": "Conflicting version specifications for Flask in requirements.txt.",
+      "evidence": "requirements.txt line 1: `flask==2.0.1`; line 2: `flask>=3.0`.",
+      "recommendation": "Consolidate to a single, consistent version constraint (e.g., `flask>=3.0`)."
+    },
+    {
+      "rule_id": "HYG-001",
+      "category": "repository_hygiene",
+      "severity": "medium",
+      "file": null,
+      "line": null,
+      "description": ".gitignore file is missing, increasing risk of committing unwanted files (e.g., __pycache__, *.pyc, .env).",
+      "evidence": "File listing does not contain a .gitignore.",
+      "recommendation": "Add a .gitignore appropriate for Python projects, ignoring compiled files, virtual environments, secrets, logs, etc."
+    },
+    {
+      "rule_id": "HYG-002",
+      "category": "repository_hygiene",
+      "severity": "medium",
+      "file": null,
+      "line": null,
+      "description": "README file is absent, providing no project overview or usage instructions.",
+      "evidence": "Search for 'README' returned no matches; file list lacks a README.",
+      "recommendation": "Create a README.md with project description, setup instructions, and contribution guidelines."
+    },
+    {
+      "rule_id": "DEP-002",
+      "category": "dependency_management",
+      "severity": "medium",
+      "file": null,
+      "line": null,
+      "description": "No lockfile is present to ensure reproducible builds.",
+      "evidence": "Repository contains requirements.txt but no Pipfile.lock, poetry.lock, or similar.",
+      "recommendation": "Generate and commit a lockfile (e.g., using `pip freeze > requirements.txt` or Poetry's `poetry.lock`)."
+    }
+  ]
+}
