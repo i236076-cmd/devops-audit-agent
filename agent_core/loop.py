@@ -13,11 +13,12 @@ import time
 
 from tools import TOOL_SCHEMAS, RepoTools, clone_repo, redact_secrets
 
-MAX_STEPS = 25               # LLM turns before we force a final report
+MAX_STEPS = 20               # LLM turns before we force a final report
+MAX_SECONDS = 240            # wall-clock budget before we force a final report
 MIN_INVESTIGATION_CALLS = 3  # refuse a report before this many inspections
 MAX_NUDGES = 2               # times we remind the model to use a tool
-KEEP_FULL_OUTPUTS = 6        # newest tool outputs kept in full in the context
-OLD_OUTPUT_CHARS = 600       # older tool outputs are shortened to this
+KEEP_FULL_OUTPUTS = 4        # newest tool outputs kept in full in the context
+OLD_OUTPUT_CHARS = 400       # older tool outputs are shortened to this
 
 CATEGORIES = [
     "repository_hygiene", "dependency_management", "code_quality", "testing",
@@ -68,14 +69,14 @@ SYSTEM_PROMPT = """You are a senior DevOps engineer auditing a GitHub repository
 TOOLS
 - list_files(directory, max_files): files tracked by git. Start here.
 - read_file(path, start_line, max_lines): file contents with line numbers.
-- search_code(pattern): regex search, returns file:line: snippet.
+- search_code(pattern, path): regex search, returns file:line: snippet. path optionally limits it to one directory.
 - git_log(max_count, path): commit history.
 - run_ruff(): static lint for Python code.
 - submit_report(violations): finish. Call it exactly once when the investigation is complete.
 
 HOW TO INVESTIGATE
-Form a hypothesis from what you observe, pick the tool that tests it, read the result, then follow up. Adapt to the project type (Python, Node, Docker, ...). Areas to cover:
-1. repository_hygiene: README present, .gitignore suitable for the language, tracked build/temp/generated files (__pycache__, .pyc, node_modules, .DS_Store, *.log, dist/, committed .env), large binaries.
+Form a hypothesis from what you observe, pick the tool that tests it, read the result, then follow up. Adapt to the project type (Python, Node, Docker, ...). Request several independent tool calls in the same turn instead of one at a time. Read configuration, CI, dependency and build files in full, but do not read every source file: use search_code to look for specific problems instead. Areas to cover:
+1. repository_hygiene: README present and not empty, .gitignore suitable for the language, tracked build/temp/generated files (__pycache__, .pyc, node_modules, .DS_Store, *.log, dist/, committed .env), large binaries.
 2. dependency_management: manifests vs lockfiles, conflicting or duplicate specifications, unpinned or very loose version constraints.
 3. code_quality: linter/formatter setup (ruff, flake8, black, eslint, prettier, pre-commit) and obvious maintainability problems you actually saw.
 4. testing: are there tests? Does CI run them? Do they look broken?
@@ -90,6 +91,10 @@ EVIDENCE RULES (precision matters: a wrong finding is penalised)
 - An absent optional file is not a defect if an equivalent exists (pyproject.toml instead of requirements.txt, ruff configured in pyproject, flake8 instead of ruff, pre-commit instead of a CI lint job). Check for equivalents before claiming something is missing.
 - Never infer remote settings such as branch protection from repository files.
 - Do not report the same underlying problem twice. One entry per distinct defect.
+- Always give file and line when the evidence is in a specific file. Omit them only for problems about something missing.
+- run_ruff output is style-level. Report it only for clear defects such as syntax errors or undefined names, never for rule codes that only express style preferences.
+- An empty file (0 lines) where content is expected, such as a README or test file, counts as missing. Empty or missing tests belong in category testing.
+- Example or template files such as .env.example are good practice, not a risk. A linter that is installed but has no config file is not a defect, because tools have sensible defaults.
 - If the repository looks healthy, report an empty list. Do not invent problems.
 - Scope is software engineering and DevOps only. Ignore ML training code, datasets, model quality and experiment tracking.
 - Never write a secret's value anywhere. State that a credential is hardcoded, not what it is.
@@ -105,16 +110,19 @@ When finished, call submit_report once. Each violation needs rule_id, category, 
 
 
 class AuditAgent:
-    def __init__(self, llm, tools, repo_url, max_steps=MAX_STEPS, min_interval=None, log=None):
+    def __init__(self, llm, tools, repo_url, max_steps=MAX_STEPS, min_interval=None, log=None,
+                 max_seconds=MAX_SECONDS):
         self.llm = llm
         self.tools = tools
         self.repo_url = repo_url
         self.max_steps = max_steps
+        self.max_seconds = max_seconds
         if min_interval is None:
             min_interval = float(os.getenv("LLM_MIN_INTERVAL", "1.0"))
         self.min_interval = min_interval
         self.log = log or (lambda text: print(text, file=sys.stderr))
         self.trace = []
+        self._t0 = time.monotonic()
         self._last_call = 0.0
 
     # ---- helpers ---------------------------------------------------------
@@ -147,7 +155,8 @@ class AuditAgent:
             "arguments": arguments,
             "output_preview": redact_secrets(output)[:300],
         })
-        self.log(f"[step {step}] {name}({json.dumps(arguments)[:120]})")
+        elapsed = time.monotonic() - self._t0
+        self.log(f"[step {step} +{elapsed:.0f}s] {name}({json.dumps(arguments)[:120]})")
 
     @staticmethod
     def _check_submission(arguments, inspections):
@@ -171,8 +180,12 @@ class AuditAgent:
         tool_defs = TOOL_SCHEMAS + [SUBMIT_SCHEMA]
         inspections = 0
         nudges = 0
+        self._t0 = time.monotonic()
 
         for step in range(1, self.max_steps + 1):
+            if time.monotonic() - self._t0 > self.max_seconds:
+                self.log("[agent] time budget used up")
+                break
             response = self._ask(messages, tool_defs)
 
             if not response.tool_calls:

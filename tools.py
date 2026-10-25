@@ -24,7 +24,7 @@ CLONE_TIMEOUT = 120      # seconds
 CMD_TIMEOUT = 30         # seconds
 SEARCH_TIMEOUT = 20      # seconds
 MAX_FILE_BYTES = 200_000
-MAX_OUTPUT_CHARS = 8000
+MAX_OUTPUT_CHARS = 6000
 
 # Patterns that look like credentials. Used to mask values before output.
 SECRET_PATTERNS = [
@@ -198,7 +198,7 @@ class RepoTools:
             note += "\n... (file larger than 200KB, only the start was read)"
         return f"{path}:\n{numbered}{note}"
 
-    def search_code(self, pattern, ignore_case=True, max_results=40):
+    def search_code(self, pattern, path="", ignore_case=True, max_results=40):
         """Regex search across tracked text files. Returns file:line: snippet."""
         try:
             regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
@@ -206,7 +206,10 @@ class RepoTools:
             return f"ERROR: invalid regex {pattern!r}: {exc}"
         results = []
         deadline = time.monotonic() + SEARCH_TIMEOUT
+        prefix = (path or "").strip().strip("/")
         for rel in self._tracked_files():
+            if prefix and not (rel == prefix or rel.startswith(prefix + "/")):
+                continue
             if time.monotonic() > deadline:
                 results.append("... search stopped early (time limit)")
                 break
@@ -336,6 +339,7 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "Python regular expression"},
+                "path": {"type": "string", "description": "Optional directory or file to restrict the search to"},
                 "ignore_case": {"type": "boolean"},
                 "max_results": {"type": "integer"},
             },
