@@ -94,3 +94,12 @@ def test_write_report_creates_valid_json(tmp_path, repo_root):
     assert data["repository"] == "https://github.com/a/b"
     assert data["violations"][0]["file"] == "ci.yml"
     assert not list(target.parent.glob("*.tmp"))
+
+
+def test_same_file_and_line_is_one_defect_and_keeps_the_higher_severity(repo_root):
+    result = normalize_violations([
+        finding(category="testing", severity="medium", description="CI hides test failures"),
+        finding(severity="high", description="pytest || true"),
+    ], repo_root)
+    assert len(result) == 1
+    assert result[0]["severity"] == "high"

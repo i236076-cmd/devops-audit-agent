@@ -256,3 +256,11 @@ def test_forced_report_falls_back_when_the_provider_rejects_forced_tool_choice(s
                    LLMError("400 tool_choice is not supported"), REPORT])
     assert make_agent(llm, sample_repo, max_steps=3).run() == [VIOLATION]
     assert [call["force_tool"] for call in llm.calls[-2:]] == ["submit_report", None]
+
+
+def test_unresolved_gaps_are_sent_back_a_second_time(sample_repo):
+    llm = FakeLLM([tool_reply(("list_files", {})), tool_reply(("git_log", {})), tool_reply(("git_log", {})),
+                   REPORT, REPORT, REPORT])
+    assert make_agent(llm, sample_repo, coverage_reviews=2).run() == [VIOLATION]
+    assert len(llm.calls) == 6
+    assert "Open every file listed above" in [m["content"] for m in llm.calls[4]["messages"] if m["role"] == "tool"][-1]

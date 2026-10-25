@@ -123,6 +123,11 @@ The agent cycle, implemented in plain Python with no agent framework:
 ### Guard rails
 
 - The model must inspect the repository at least three times before a report is accepted.
+- A completeness check compares what the model inspected with what exists in the repository (credential
+  search, dependency files, configuration files, CI workflows, README). Gaps are sent back to the model,
+  at most twice. The model still decides which tools to call and what counts as a finding.
+- If the model keeps answering in plain text, the final `submit_report` call is forced through the
+  provider's tool-choice setting.
 - A step limit and a time budget force the model to submit what it has found so far.
 - Old tool outputs are shortened so the context stays small.
 - Rate limits wait as long as the server asks (up to 60 s). A daily quota fails immediately with a
@@ -130,7 +135,7 @@ The agent cycle, implemented in plain Python with no agent framework:
 - The prompt contains the evidence rules from the assignment: an absent optional file is not a defect
   when an equivalent exists, remote branch protection is never inferred, healthy repositories get an
   empty list, and ML-specific topics are out of scope.
-- Reports are post-processed in code: findings without evidence are dropped, duplicates are merged,
+- Reports are post-processed in code: findings without evidence are dropped, findings on the same file and line are merged (the highest severity wins),
   severities are validated, a cited file must exist and a cited line must be inside it (otherwise they
   become `null`), and rule ids are renumbered per category.
 

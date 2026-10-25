@@ -78,7 +78,7 @@ def _clean_line(value, path, repo_root):
 
 def normalize_violations(raw, repo_root=None):
     """Validate, de-duplicate, sort and renumber the agent's findings."""
-    cleaned, seen = [], set()
+    candidates = []
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, dict):
             continue
@@ -94,14 +94,11 @@ def normalize_violations(raw, repo_root=None):
         path = _clean_path(item.get("file"), repo_root)
         line = _clean_line(item.get("line"), path, repo_root)
 
-        key = (category, path, line) if line else (category, path, description[:50].lower())
-        if key in seen:
-            continue
-        seen.add(key)
-
         match = re.match(r"^([A-Z]{2,5})-\d+$", str(item.get("rule_id", "")).strip().upper())
         prefix = PREFIXES.get(category) or (match.group(1) if match else "GEN")
-        cleaned.append({
+        # two findings on the same file and line describe the same defect
+        key = (path, line) if line else (category, path, description[:50].lower())
+        candidates.append((key, {
             "rule_id": prefix,  # numbered below
             "category": category,
             "severity": severity,
@@ -110,9 +107,16 @@ def normalize_violations(raw, repo_root=None):
             "description": description,
             "evidence": evidence,
             "recommendation": _clean_text(item.get("recommendation")) or DEFAULT_RECOMMENDATION,
-        })
+        }))
 
-    cleaned.sort(key=lambda v: (SEVERITY_ORDER[v["severity"]], v["file"] or "", v["line"] or 0))
+    # most severe first, so the highest severity survives when findings are merged
+    candidates.sort(key=lambda c: (SEVERITY_ORDER[c[1]["severity"]], c[1]["file"] or "", c[1]["line"] or 0))
+    cleaned, seen = [], set()
+    for key, violation in candidates:
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(violation)
+
     counters = {}
     for violation in cleaned:
         prefix = violation["rule_id"]

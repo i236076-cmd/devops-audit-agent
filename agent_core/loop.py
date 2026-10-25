@@ -19,7 +19,7 @@ MAX_STEPS = 20               # LLM turns before we force a final report
 MAX_SECONDS = 240            # wall-clock budget before we force a final report
 MIN_INVESTIGATION_CALLS = 3  # refuse a report before this many inspections
 MAX_NUDGES = 2               # times we remind the model to use a tool
-MAX_COVERAGE_REVIEWS = 1     # times a report is sent back to close inspection gaps
+MAX_COVERAGE_REVIEWS = 2     # times a report is sent back to close inspection gaps
 KEEP_FULL_OUTPUTS = 4        # newest tool outputs kept in full in the context
 OLD_OUTPUT_CHARS = 400       # older tool outputs are shortened to this
 
@@ -273,7 +273,8 @@ class AuditAgent:
                             reviews_left -= 1
                             output = ("Not accepted yet. Before finishing, close these gaps:\n- "
                                       + "\n- ".join(gaps)
-                                      + "\nInspect them with your tools, add any real findings, "
+                                      + "\nOpen every file listed above and run the missing search with your tools "
+                                        "(several calls at once are fine), add any real findings, "
                                         "then call submit_report again.")
                         else:
                             accepted = violations
