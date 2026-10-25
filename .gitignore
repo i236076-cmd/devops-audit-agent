@@ -6,3 +6,6 @@ __pycache__/
 .ruff_cache/
 workdir/
 report.json
+.env.*
+!.env.example
+report.trace.json

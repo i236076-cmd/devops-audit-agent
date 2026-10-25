@@ -14,6 +14,8 @@ Internal message format (provider neutral):
 
 import json
 import os
+import re
+import sys
 import time
 from dataclasses import dataclass, field
 
@@ -27,7 +29,8 @@ DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "anthropic": "claude-sonnet-5-5",
 }
-MAX_RETRIES = 3
+MAX_RETRIES = 4
+MAX_RATE_WAIT = 60  # never sleep longer than this for a rate limit (seconds)
 REQUEST_TIMEOUT = 90  # seconds
 MAX_OUTPUT_TOKENS = 4096
 
@@ -54,9 +57,10 @@ class LLMResponse:
 # OpenAI (and OpenAI-compatible) backend
 # --------------------------------------------------------------------------
 class OpenAIBackend:
-    def __init__(self, client, model):
+    def __init__(self, client, model, reasoning_effort=None):
         self.client = client
         self.model = model
+        self.reasoning_effort = reasoning_effort
 
     @staticmethod
     def _convert(system, messages):
@@ -93,6 +97,8 @@ class OpenAIBackend:
 
     def complete(self, system, messages, tools):
         kwargs = {"model": self.model, "messages": self._convert(system, messages)}
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
         if tools:
             kwargs["tools"] = [{"type": "function", "function": tool} for tool in tools]
         response = self.client.chat.completions.create(**kwargs)
@@ -106,7 +112,9 @@ class OpenAIBackend:
             extra = getattr(call, "extra_content", None)
             if extra is None:
                 extra = (getattr(call, "model_extra", None) or {}).get("extra_content")
-            calls.append(ToolCall(call.id, call.function.name, arguments, extra))
+            # some models prefix tool names (e.g. repo_browser.list_files)
+            name = call.function.name.split(".")[-1]
+            calls.append(ToolCall(call.id, name, arguments, extra))
         return LLMResponse(message.content or "", calls)
 
 
@@ -186,6 +194,33 @@ def _is_retryable(exc):
     return "Timeout" in name or "Connection" in name
 
 
+def _retry_delay(text):
+    """Seconds the server asked us to wait ("retry in 1m23.5s", "try again in 850ms")."""
+    match = re.search(r"(?:try again|retry) in ((?:\d+(?:\.\d+)?(?:ms|h|m|s))+)", text)
+    if not match:
+        return None
+    units = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
+    return sum(
+        float(value) * units[unit]
+        for value, unit in re.findall(r"(\d+(?:\.\d+)?)(ms|h|m|s)", match.group(1))
+    )
+
+
+def _retry_wait(exc, attempt):
+    """Seconds to wait before retrying, or None when retrying is pointless."""
+    if not _is_retryable(exc):
+        return None
+    if getattr(exc, "status_code", None) == 429:
+        text = str(exc)
+        delay = _retry_delay(text)
+        if delay is None:
+            if re.search(r"per day|perday|daily", text, re.IGNORECASE):
+                return None  # daily quota: waiting a few seconds will not help
+            return 2 ** attempt * 2
+        return None if delay > MAX_RATE_WAIT else delay + 1
+    return 2 ** attempt
+
+
 class LLMClient:
     def __init__(self, backend, provider, model):
         self.backend = backend
@@ -200,13 +235,23 @@ class LLMClient:
                 return self.backend.complete(system, messages, tools or [])
             except Exception as exc:  # SDK exception types differ per provider
                 last_error = exc
-                if not _is_retryable(exc) or attempt == MAX_RETRIES:
+                wait = _retry_wait(exc, attempt)
+                if wait is None or attempt == MAX_RETRIES:
                     break
-                time.sleep(2 ** attempt)  # 2s, 4s
+                print(f"[llm] {type(exc).__name__}, retrying in {wait:.0f}s "
+                      f"(attempt {attempt}/{MAX_RETRIES})", file=sys.stderr)
+                time.sleep(wait)
         status = getattr(last_error, "status_code", None)
         if status in (401, 403):
             raise LLMError(
                 f"{self.provider} rejected the API key (HTTP {status}). Check your .env file."
+            )
+        if status == 429:
+            delay = _retry_delay(str(last_error))
+            when = f" Retry in about {int(delay)}s." if delay else ""
+            raise LLMError(
+                f"{self.provider} rate limit or quota reached for {self.model}.{when} "
+                "Wait, or change LLM_MODEL / the provider in .env."
             )
         detail = redact_secrets(str(last_error))[:300]
         raise LLMError(f"{self.provider} request failed: {type(last_error).__name__}: {detail}")
@@ -247,7 +292,8 @@ def create_client():
             timeout=REQUEST_TIMEOUT,
             max_retries=0,
         )
-        return LLMClient(OpenAIBackend(client, model), provider, model)
+        effort = (os.getenv("LLM_REASONING_EFFORT") or "").strip() or None
+        return LLMClient(OpenAIBackend(client, model, effort), provider, model)
 
     if not anthropic_key:
         raise LLMError("ANTHROPIC_API_KEY is missing or still a placeholder in .env")
