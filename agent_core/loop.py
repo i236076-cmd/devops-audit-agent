@@ -12,6 +12,7 @@ import shutil
 import sys
 import time
 
+from agent_core.llm import LLMError
 from tools import TOOL_SCHEMAS, RepoTools, clone_repo, redact_secrets
 
 MAX_STEPS = 20               # LLM turns before we force a final report
@@ -153,13 +154,14 @@ class AuditAgent:
         self._last_call = 0.0
 
     # ---- helpers ---------------------------------------------------------
-    def _ask(self, messages, tool_defs):
+    def _ask(self, messages, tool_defs, force_tool=None):
         """One LLM request, spaced out to respect provider rate limits."""
         wait = self.min_interval - (time.monotonic() - self._last_call)
         if wait > 0:
             time.sleep(wait)
         try:
-            return self.llm.chat(SYSTEM_PROMPT, self._compact(messages), tool_defs)
+            extra = {"force_tool": force_tool} if force_tool else {}
+            return self.llm.chat(SYSTEM_PROMPT, self._compact(messages), tool_defs, **extra)
         finally:
             self._last_call = time.monotonic()
 
@@ -241,13 +243,15 @@ class AuditAgent:
             response = self._ask(messages, tool_defs)
 
             if not response.tool_calls:
+                self.log(f"[agent] reply without a tool call: {redact_secrets(response.text or '')[:150]!r}")
                 nudges += 1
                 if nudges > MAX_NUDGES:
-                    raise AgentError("The model stopped using tools without submitting a report")
+                    return self._force_report(messages)
                 messages.append({"role": "assistant", "content": response.text or "(no output)"})
                 messages.append({
                     "role": "user",
-                    "content": "Continue the audit by calling a tool, or call submit_report if you are done.",
+                    "content": "Reply with a tool call. If you are finished, call the submit_report function "
+                               "with your findings; do not write the report as plain text.",
                 })
                 continue
 
@@ -286,18 +290,21 @@ class AuditAgent:
         return self._force_report(messages)
 
     def _force_report(self, messages):
-        """Step limit reached: make the model submit what it has found."""
-        self.log("[agent] step limit reached, requesting final report")
+        """Out of steps, time or patience: make the model submit what it has found."""
+        self.log("[agent] requesting the final report")
         messages.append({
             "role": "user",
-            "content": "Step limit reached. Call submit_report now with the violations you have verified.",
+            "content": "Time to finish. Call submit_report now with the violations you have verified.",
         })
-        response = self._ask(messages, [SUBMIT_SCHEMA])
+        try:
+            response = self._ask(messages, [SUBMIT_SCHEMA], force_tool="submit_report")
+        except LLMError:
+            response = self._ask(messages, [SUBMIT_SCHEMA])  # the provider may not support forced tool choice
         for call in response.tool_calls:
             if call.name == "submit_report" and isinstance(call.arguments.get("violations"), list):
                 self._record(self.max_steps + 1, "submit_report", {}, "forced report")
                 return call.arguments["violations"]
-        raise AgentError("The model did not submit a report before the step limit")
+        raise AgentError("The model did not submit a report")
 
 
 if __name__ == "__main__":

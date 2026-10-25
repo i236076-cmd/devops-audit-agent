@@ -95,12 +95,14 @@ class OpenAIBackend:
                 out.append({"role": msg["role"], "content": msg["content"]})
         return out
 
-    def complete(self, system, messages, tools):
+    def complete(self, system, messages, tools, force_tool=None):
         kwargs = {"model": self.model, "messages": self._convert(system, messages)}
         if self.reasoning_effort:
             kwargs["reasoning_effort"] = self.reasoning_effort
         if tools:
             kwargs["tools"] = [{"type": "function", "function": tool} for tool in tools]
+        if force_tool:
+            kwargs["tool_choice"] = {"type": "function", "function": {"name": force_tool}}
         response = self.client.chat.completions.create(**kwargs)
         message = response.choices[0].message
         calls = []
@@ -157,7 +159,7 @@ class AnthropicBackend:
                 out.append({"role": "user", "content": msg["content"]})
         return out
 
-    def complete(self, system, messages, tools):
+    def complete(self, system, messages, tools, force_tool=None):
         kwargs = {
             "model": self.model,
             "max_tokens": MAX_OUTPUT_TOKENS,
@@ -173,6 +175,8 @@ class AnthropicBackend:
                 }
                 for tool in tools
             ]
+        if force_tool:
+            kwargs["tool_choice"] = {"type": "tool", "name": force_tool}
         response = self.client.messages.create(**kwargs)
         text_parts, calls = [], []
         for block in response.content:
@@ -236,12 +240,12 @@ class LLMClient:
         self.provider = provider
         self.model = model
 
-    def chat(self, system, messages, tools=None):
+    def chat(self, system, messages, tools=None, force_tool=None):
         """Send one request and return an LLMResponse. Retries transient errors."""
         last_error = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                return self.backend.complete(system, messages, tools or [])
+                return self.backend.complete(system, messages, tools or [], force_tool)
             except Exception as exc:  # SDK exception types differ per provider
                 last_error = exc
                 wait = _retry_wait(exc, attempt)

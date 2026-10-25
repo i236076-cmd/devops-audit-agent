@@ -30,8 +30,9 @@ class ScriptedBackend:
         self.replies = list(replies)
         self.calls = 0
 
-    def complete(self, system, messages, tools):
+    def complete(self, system, messages, tools, force_tool=None):
         self.calls += 1
+        self.forced = force_tool
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -185,3 +186,38 @@ def test_other_bad_requests_are_not_retried(sleeps):
     with pytest.raises(LLMError):
         LLMClient(backend, "openai", "m").chat("s", [])
     assert backend.calls == 1
+
+
+def test_client_passes_the_forced_tool_to_the_backend():
+    backend = ScriptedBackend([LLMResponse("ok")])
+    LLMClient(backend, "openai", "m").chat("s", [], force_tool="submit_report")
+    assert backend.forced == "submit_report"
+
+
+def test_forced_tool_choice_is_sent_to_both_providers():
+    from types import SimpleNamespace as NS
+
+    seen = {}
+    completion = ChatCompletion.model_validate({
+        "id": "x", "object": "chat.completion", "created": 1, "model": "m",
+        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
+    })
+
+    def create_openai(**kwargs):
+        seen["openai"] = kwargs
+        return completion
+
+    def create_anthropic(**kwargs):
+        seen["anthropic"] = kwargs
+        return NS(content=[])
+
+    openai_backend = OpenAIBackend(NS(chat=NS(completions=NS(create=create_openai))), "m")
+    anthropic_backend = AnthropicBackend(NS(messages=NS(create=create_anthropic)), "m")
+    question = [{"role": "user", "content": "x"}]
+
+    openai_backend.complete("s", question, [], "submit_report")
+    assert seen["openai"]["tool_choice"] == {"type": "function", "function": {"name": "submit_report"}}
+    anthropic_backend.complete("s", question, [], "submit_report")
+    assert seen["anthropic"]["tool_choice"] == {"type": "tool", "name": "submit_report"}
+    openai_backend.complete("s", question, [])
+    assert "tool_choice" not in seen["openai"]

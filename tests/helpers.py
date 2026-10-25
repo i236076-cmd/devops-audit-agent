@@ -13,8 +13,9 @@ class FakeLLM:
         self.replies = list(replies)
         self.calls = []
 
-    def chat(self, system, messages, tools=None):
-        self.calls.append({"messages": list(messages), "tools": [t["name"] for t in tools or []]})
+    def chat(self, system, messages, tools=None, force_tool=None):
+        self.calls.append({"messages": list(messages), "tools": [t["name"] for t in tools or []],
+                           "force_tool": force_tool})
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply

@@ -58,7 +58,8 @@ def test_report_before_enough_inspection_is_rejected(sample_repo):
 
 
 def test_model_that_never_uses_tools_fails_cleanly(sample_repo):
-    llm = FakeLLM([LLMResponse("thinking"), LLMResponse("still thinking"), LLMResponse("nothing")])
+    llm = FakeLLM([LLMResponse("thinking"), LLMResponse("still thinking"), LLMResponse("nothing"),
+                   LLMResponse("and again nothing")])
     with pytest.raises(AgentError):
         make_agent(llm, sample_repo).run()
 
@@ -240,3 +241,18 @@ def test_cli_does_not_leave_a_stale_report_behind_on_failure(cli):
     assert cli([LLMError("quota reached")]) == 1
     assert not cli.report.exists()
     assert not (cli.report.parent / "report.trace.json").exists()
+
+
+def test_text_only_replies_end_with_a_forced_report(sample_repo):
+    llm = FakeLLM(INSPECTION + [LLMResponse("here is my analysis in prose")] * 3 + [REPORT])
+    assert make_agent(llm, sample_repo).run() == [VIOLATION]
+    assert llm.calls[-1]["force_tool"] == "submit_report"
+    assert llm.calls[-1]["tools"] == ["submit_report"]
+    assert llm.calls[3]["messages"][-1]["content"].startswith("Reply with a tool call")
+
+
+def test_forced_report_falls_back_when_the_provider_rejects_forced_tool_choice(sample_repo):
+    llm = FakeLLM([tool_reply(("list_files", {})), tool_reply(("git_log", {})), tool_reply(("git_log", {})),
+                   LLMError("400 tool_choice is not supported"), REPORT])
+    assert make_agent(llm, sample_repo, max_steps=3).run() == [VIOLATION]
+    assert [call["force_tool"] for call in llm.calls[-2:]] == ["submit_report", None]
