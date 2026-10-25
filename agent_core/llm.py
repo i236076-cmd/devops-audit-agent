@@ -186,10 +186,17 @@ class AnthropicBackend:
 # --------------------------------------------------------------------------
 # Public client with retries
 # --------------------------------------------------------------------------
+def _is_parse_failure(text):
+    """The provider rejected a tool call the model wrote badly (a model glitch, not our bug)."""
+    return bool(re.search(r"output_parse_failed|Parsing failed|failed_generation", text))
+
+
 def _is_retryable(exc):
     status = getattr(exc, "status_code", None)
     if status in (408, 409, 429, 500, 502, 503, 504, 529):
         return True
+    if status == 400 and _is_parse_failure(str(exc)):
+        return True  # sampling again usually produces a valid tool call
     name = type(exc).__name__
     return "Timeout" in name or "Connection" in name
 
@@ -210,6 +217,8 @@ def _retry_wait(exc, attempt):
     """Seconds to wait before retrying, or None when retrying is pointless."""
     if not _is_retryable(exc):
         return None
+    if getattr(exc, "status_code", None) == 400:
+        return 1  # malformed model output: just ask again
     if getattr(exc, "status_code", None) == 429:
         text = str(exc)
         delay = _retry_delay(text)

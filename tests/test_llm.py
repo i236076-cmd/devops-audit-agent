@@ -170,3 +170,18 @@ def test_create_client_supports_openai_compatible_services(clean_env):
     assert client.model == "my-model"
     assert client.backend.reasoning_effort == "low"
     assert "api.example.com" in str(client.backend.client.base_url)
+
+
+def test_malformed_model_output_is_retried(sleeps):
+    parse_error = HttpError(400, "Parsing failed. code: output_parse_failed, failed_generation: ...")
+    backend = ScriptedBackend([parse_error, LLMResponse("ok")])
+    assert LLMClient(backend, "openai", "m").chat("s", []).text == "ok"
+    assert backend.calls == 2
+    assert sleeps == [1]
+
+
+def test_other_bad_requests_are_not_retried(sleeps):
+    backend = ScriptedBackend([HttpError(400, "maximum context length exceeded"), LLMResponse("ok")])
+    with pytest.raises(LLMError):
+        LLMClient(backend, "openai", "m").chat("s", [])
+    assert backend.calls == 1

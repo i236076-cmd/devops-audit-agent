@@ -49,6 +49,14 @@ def main(argv=None):
     if args.max_steps < 1 or args.max_seconds < 1:
         return fail("--max-steps and --max-seconds must be positive", 2)
 
+    trace_path = None if args.no_trace else (args.trace or str(Path(args.output).with_suffix(".trace.json")))
+    for stale in (args.output, trace_path):  # never leave the results of an earlier run behind
+        if stale:
+            try:
+                Path(stale).unlink(missing_ok=True)
+            except OSError:
+                pass
+
     clone_path = None
     started = time.monotonic()
     try:
@@ -72,8 +80,7 @@ def main(argv=None):
         if clone_path:
             shutil.rmtree(clone_path, ignore_errors=True)
 
-    if not args.no_trace:
-        trace_path = args.trace or str(Path(args.output).with_suffix(".trace.json"))
+    if trace_path:
         try:
             write_json(trace_path, {
                 "repository": repo_url,

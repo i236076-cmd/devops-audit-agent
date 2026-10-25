@@ -231,3 +231,12 @@ def test_dotfiles_such_as_env_count_as_configuration_files(tmp_path):
     assert ".env" in " ".join(audit._coverage_gaps([]))
     audit.trace.append({"tool": "read_file", "arguments": {"path": ".env"}})
     assert "configuration files" not in " ".join(audit._coverage_gaps([]))
+
+
+def test_cli_does_not_leave_a_stale_report_behind_on_failure(cli):
+    cli.report.parent.mkdir(parents=True)
+    cli.report.write_text('{"old": true}')
+    (cli.report.parent / "report.trace.json").write_text("{}")
+    assert cli([LLMError("quota reached")]) == 1
+    assert not cli.report.exists()
+    assert not (cli.report.parent / "report.trace.json").exists()
