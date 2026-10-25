@@ -9,3 +9,4 @@ report.json
 .env.*
 !.env.example
 report.trace.json
+demo_report*.json
