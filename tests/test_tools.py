@@ -132,3 +132,33 @@ def test_tools_leave_the_repository_unchanged(sample_repo):
         ["git", "-C", str(sample_repo), "status", "--porcelain"], capture_output=True, text=True
     ).stdout
     assert status == ""
+
+
+@pytest.mark.parametrize("line", [
+    "DB_PASSWORD=hunter2hunter2",
+    "export API_TOKEN=abc123xyz789",
+    "SECRET_KEY = s3cr3t-value-here-123",
+    "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+])
+def test_redact_masks_unquoted_env_style_secrets(line):
+    cleaned = redact_secrets(line)
+    assert cleaned.endswith("[REDACTED]")
+    assert cleaned.split("=")[0] == line.split("=")[0]
+
+
+@pytest.mark.parametrize("line", [
+    "OPENAI_API_KEY=",
+    "OPENAI_API_KEY=your_openai_key_here",
+    "API_KEY=<your key>",
+    "DB_PASSWORD=changeme",
+    'SECRET_KEY = os.environ["SECRET_KEY"]',
+    "API_KEY = os.getenv('API_KEY')",
+    "TOKEN=${GITHUB_TOKEN}",
+    "DEBUG=true",
+])
+def test_redact_keeps_placeholders_and_references_readable(line):
+    assert redact_secrets(line) == line
+
+
+def test_redact_env_style_does_not_swallow_the_next_line():
+    assert redact_secrets("API_KEY=\nNAME=demo") == "API_KEY=\nNAME=demo"

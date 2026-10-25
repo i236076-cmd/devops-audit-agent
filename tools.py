@@ -42,6 +42,21 @@ SECRET_PATTERNS = [
 ]
 
 
+# Unquoted env-style lines such as DB_PASSWORD=hunter2 (typical for .env files).
+ENV_SECRET = re.compile(
+    r"(?m)^([ \t]*(?:export[ \t]+)?[A-Z][A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PWD)[A-Z0-9_]*[ \t]*=[ \t]*)"
+    r"(?![\"'$#{(\[])(?![^\s#]*[(\[{])([^\s#]+)"
+)
+# Obvious placeholders stay readable so example files are not mistaken for leaks.
+PLACEHOLDER = re.compile(r"(?i)^(your[_-].*|<.*|change[_-]?me|x{3,}|\*{3,}|example.*|placeholder.*|.*[_-]here|todo|none|null)$")
+
+
+def _mask_env(match):
+    if PLACEHOLDER.match(match.group(2)):
+        return match.group(0)
+    return match.group(1) + "[REDACTED]"
+
+
 def redact_secrets(text):
     """Mask anything that looks like a credential, keeping line numbers intact."""
 
@@ -53,7 +68,7 @@ def redact_secrets(text):
 
     for pattern in SECRET_PATTERNS:
         text = pattern.sub(_mask, text)
-    return text
+    return ENV_SECRET.sub(_mask_env, text)
 
 
 # --------------------------------------------------------------------------
